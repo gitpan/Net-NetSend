@@ -1,4 +1,4 @@
-Net/NetSend version 0.11
+Net/NetSend version 0.12
 ====================================
 
 This module, Net::NetSend is a pure perl implementation of the net 
@@ -28,7 +28,7 @@ This module requires these other modules and libraries:
 
 COPYRIGHT AND LICENCE
 
-Copyright (C) 2004 Florian Greb
+Copyright (C) 2004-2005 Florian Greb
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself. 

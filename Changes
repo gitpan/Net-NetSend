@@ -43,3 +43,7 @@ Revision history for Perl extension Net::NetSend.
 	- error message improvements
 	- bugfix for accumulating error texts
 	- extended documentation
+
+0.12  Sun Feb 20 17:03:34 2005
+	- method to lookup netbios name by IP address added
+	- minor code adjustments

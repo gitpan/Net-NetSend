@@ -18,12 +18,12 @@ our @ISA = qw(Exporter);
 # This allows declaration	use Net::NetSend ':all';
 # If you do not need this, moving things directly into @EXPORT or @EXPORT_OK
 # will save memory.
-our %EXPORT_TAGS = ( 'all' => [ qw( sendMsg ) ] );
+our %EXPORT_TAGS = ( 'all' => [ qw( sendMsg getNbName ) ] );
 
 our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
 
 our @EXPORT = qw();
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 
 # Preloaded methods go here.
 
@@ -68,13 +68,13 @@ my $overall_succes=1;				#Status
 my $error_texts="";				#Error information storage
 
 
-sub sendMsg{
+sub sendMsg($$$$;$){
 	$@='';
 	$error_texts='';
-	if(@_ < 4){
-		$@ .= "Not enough arguments.\n";
-		return 0;
-	}
+#	if(@_ < 4){
+#		$@ .= "Not enough arguments.\n";
+#		return 0;
+#	}
 	my $target_netbios_name_cleartext=uc(shift); 		# "Called Name"
 	my $source_netbios_name_cleartext=uc(shift); 		# "Calling Name", can be faked here
 	my $target_ip=shift;					# target ip.
@@ -111,7 +111,128 @@ sub sendMsg{
 }
 
 
+sub getNbName($;$){
+	(my $target_ip, my $debug) = @_;
+	my $target_port = 137;
+	print "Looking for a netbios name for $target_ip...\n" if $debug;
 
+	#####################################
+	#     	   Create Query Packet	    #
+	#####################################
+
+	my $nbq=''; #nbq = netbios name query
+	#first 2 bytes = random transaction id
+	$nbq .= chr(rand(142)+1);
+	$nbq .= chr(rand(142)+1);
+	# then: 2 bytes for flags (none set)
+	$nbq .= chr(0)x2;
+	# then: 2 bytes for the number of questions (one)
+	$nbq .= chr(0).chr(0x01);
+	# then: 2 bytes each for answer, authority and additional RRs (none)
+	$nbq .= chr(0)x6;
+	# then: the actual query. name first
+	$nbq .= " CK".("A"x30).chr(0);
+	# then: type (NBSTAT)
+	$nbq .= chr(0).chr(0x21);
+	# then: class (inet)
+	$nbq .= chr(0).chr(0x01);
+	# packet is now ready for delivery
+	
+
+	#####################################
+	#     	   Create Socket	    #
+	#####################################
+	my $proto = getprotobyname("udp");
+	my $host = inet_aton($target_ip) or die "Unknown host: $target_ip\n";
+	my $sock;
+	socket($sock, AF_INET, SOCK_DGRAM, $proto) or die "Could not create socket. Socket() failed: $!\n";
+	my $dest_addr = sockaddr_in($target_port, $host);
+	connect($sock, $dest_addr) 
+		or die "connect() of socket to target IP $target_ip failed: $!\n";
+	$sock->autoflush(1);
+
+	#####################################
+	# 	  Send Name Query	    #
+	#####################################
+
+	print $sock $nbq;
+	
+	#####################################
+	#       Receive & Check Answer	    #
+	#####################################
+	my $nbanswer;
+
+	my $answer_received=0;
+	my $inmask = ''; 
+	vec($inmask, fileno($sock), 1) = 1;
+	while (select(my $outmask = $inmask, undef, undef, 0.8)) {
+		recv($sock, $nbanswer, 1000, 0);
+		$answer_received = 1;
+	}
+
+	if(!$answer_received){ 
+		$@="Timeout while waiting for answer from $target_ip.\n";
+		print $@ if $debug;
+		return 0;
+	}
+	
+	if(length($nbanswer) == 0){
+		$@ = "Zero length answer received. Often this caused".
+			  " by an ICMP destination unreacheable packet.\n";
+		print $@ if $debug;
+		return 0;
+	}
+			 
+	if(length($nbanswer) < 20){
+		$@ = "Too short answer (" . length($nbanswer) . 
+			  " chars) received:\n" . hexdump($nbanswer);
+		print $@ if $debug;
+		return 0;
+	}
+	# strip header
+	$nbanswer = substr($nbanswer, 12);
+	# counting from 0
+	# 42/43: data length
+	# 44: number of names
+	# now n 18-byte-steps, the wanted name ends with 0x03 0x04 0x00
+	
+	my $num_answers = ord(substr($nbanswer, 44, 1));
+	
+	my @names03=();
+
+	for(my $i = 0; $i < $num_answers; $i++){
+		my $service = substr($nbanswer, 44+ 16+ $i*18, 1);
+		my $typeflags = substr($nbanswer, 44+ 17+ $i*18, 2);
+		if($debug){ 
+			print "\nCandidate $i\n"; 
+			print hexdump(substr($nbanswer, 44+ $i*18, 16));
+			print "\tService ".hexdump($service);
+			print "\n\tTypeflags ".hexdump($typeflags)."\n\n";
+		}
+		# we got our target?
+		if($service eq chr(0x03)){
+			# && ($typeflags eq chr(0x04).chr(0) || $typeflags eq chr(0x44).chr(0))){
+			# we got it! 
+			# service 0x03 is the messenger service / main name
+			# typeflags 0x04 0x00 means B-node, unique, active
+			my $target_name = substr($nbanswer, 44+$i*18+1, 16);
+			$target_name =~ /^(\S+)( )*/;
+			push @names03, $1;
+		}
+	}
+	return $names03[0] if @names03 > 0; 
+	# @names[0] is the machine name
+	# @names[1..n] are the users that are logged on
+	$@ = "Sorry, you cannot send messages to this IP. " . 
+		"There is no messenger service running on the remote machine\n" .
+	   	"The complete answer was: " . hexdump($nbanswer) . "\n";
+	print $@ if $debug;
+	
+#	print $num_answers;
+
+	return 0;
+
+}
 
 
 sub send_multi_block_message{
@@ -132,7 +253,7 @@ sub send_multi_block_message{
 		or die "connect() of socket to $mbtarget_netbios_name_cleartext (IP: $mbtarget_ip) failed: $!\n";
 	$sock->autoflush(1);
 
-	#Compute Encoding for Source and Target NETBIOS names
+	#Compute Encoding for Source and Target NETBIOS Names
 	my $target_netbios_name_cipher	= get_nb_string($mbtarget_netbios_name_cleartext);
 	my $source_netbios_name_cipher	= get_nb_string($mbsource_netbios_name_cleartext);
 
@@ -156,9 +277,16 @@ sub send_multi_block_message{
 
 	#Check Session Request Response for Success
 	if( $init_resp !~ /^$NB_SESSION_ESTABLISHED/){
-		$error_texts .= "Warning: Session request failed.\nOpcode: 0x".sprintf("%.0x", ord(substr($init_resp, 0, 1)))."\n";
-		$overall_succes = 0;
+		my $error = ord(substr($init_resp,0,1));
+		$error_texts .= "Warning! Session request failed.\n";
+		$error_texts .= "Opcode: ".$error." (0x".sprintf("%.0x", $error).")\n";
+		$error_texts .= "Reason: " . $NB_ERROR_TEXT{$error} . ".\n\n";
+		$error_texts .= $NB_ERROR_HELP{$error} . "\n";
+		$overall_succes=0;
 		return;
+#		$error_texts .= "Warning: Session request failed.\nOpcode: 0x".sprintf("%.0x", ord(substr($init_resp, 0, 1)))."\n";
+#		$overall_succes = 0;
+#		return;
 	}
 	else{
 		print "Session established.\n" if $confirm_packets;
@@ -255,6 +383,15 @@ sub receive_and_check_answer_packet{
 	select(my $outmask = $inmask, undef, undef, 0.25);
 	recv($sock, $resp,1024, 0);
 
+	if (length($resp) < 10){
+		# crippled or no answer received
+		my $error = "No answer from remote Host";
+		$error_texts .= "Warning: $warning.\n$error\n";
+		$overall_succes=0;
+		die if $die;
+		return -1;
+	}
+	
 	if(substr($resp,9,1) ne $SMB_HEADER_ERROR_CLASS_SUCCESS){
 		my $error = ord(substr($resp,9,1));
 		$error_texts .= "Warning: $warning.\n";
@@ -308,8 +445,9 @@ sub send_single_block_message{
 	my $sock;
 	socket($sock, AF_INET, SOCK_STREAM, $proto) or die "Could not create socket. Socket() failed: $!\n";
 	my $dest_addr = sockaddr_in($target_port, $host);
+
 	connect($sock, $dest_addr) 
-		or die "connect() of socket to $target_netbios_name_cleartext (IP: $target_ip) failed: $!";
+		or die "connect() of socket to $target_netbios_name_cleartext (IP: $target_ip) failed: $!\n";
 	$sock->autoflush(1);
 
 	#####################################
@@ -324,19 +462,40 @@ sub send_single_block_message{
 
 
 	my $init_resp="";
-	my $inmask='';
-	vec($inmask, fileno($sock), 1)=1;
-	select(my $outmask = $inmask, undef, undef, 0.25);
-	recv($sock, $init_resp,1024, 0);
+	my $answer_received=0;
+	my $inmask = ''; 
+	vec($inmask, fileno($sock), 1) = 1;
+	while (select(my $outmask = $inmask, undef, undef, 0.4)) {
+		recv($sock, $init_resp, 1024, 0);
+		$answer_received = 1;
+	}
+
+	if(!$answer_received){ 
+		if($confirm_packets){
+			print "Timeout while waiting for answer from $target_ip.\n"
+		}
+		return 0;
+	}
+
+
+
+
+#	my $init_resp="";
+#	my $inmask='';
+#	vec($inmask, fileno($sock), 1)=1;
+#	select(my $outmask = $inmask, undef, undef, 0.25);
+#	recv($sock, $init_resp,1024, 0);
 	#print "Daten empfangen: $init_resp\n";
 	#print_to_file("c:\\test.log", $init_resp);
 
 	if( $init_resp !~ /^$NB_SESSION_ESTABLISHED/){
 		my $error = ord(substr($init_resp,0,1));
-		$error_texts .= "Warning! Session request failed: " . $NB_ERROR_TEXT{$error} . "\n";
+		$error_texts .= "Warning! Session request failed.\n";
 		$error_texts .= "Opcode: ".$error." (0x".sprintf("%.0x", $error).")\n";
+		$error_texts .= "Reason: " . $NB_ERROR_TEXT{$error} . ".\n";
 		$error_texts .= $NB_ERROR_HELP{$error} . "\n";
 		$overall_succes=0;
+		return;
 	}
 	else{
 		print "Session established.\n" if $confirm_packets;
@@ -423,12 +582,10 @@ sub print_to_file{
 sub get_2bytes_length{
 	my $string=shift;
 	if (length($string) > 0xFF){
-#		print_to_file("c:\\test.log", chr(length($string)));;
 		my $first = floor(length($string)/0x100);
 		my $second = length($string)-$first;
 		return chr($first).chr($second);
 	}
-#	print_to_file("c:\\test.log", chr("\0").chr(length($string)));
 	return "\0".chr(length($string));
 }
 
@@ -494,6 +651,23 @@ sub get_SMB_header{
 	return $header;
 }
 	
+sub hexdump{
+	my $text = shift;
+	my $hexdump = "";
+	for(my $i = 1; $i <= length($text); $i++){
+		$hexdump .= two(sprintf("%.0x", ord(substr($text, $i-1, 1))));
+		$hexdump .=  "00" if substr($text, $i-1, 1) eq chr(0x00);
+		$hexdump .= " ";
+		$hexdump .= "\n" if ($i % 8 == 0 && $i != 0);
+	}
+	return $hexdump;
+}
+
+sub two{
+	my $param = shift;
+	return "0".$param if length($param)==1;
+	return $param;
+}
 
 #END{
 #	print $error_texts;
@@ -512,14 +686,18 @@ Net::NetSend - Perl extension for sending Windows Popup Messages
 
   use Net::NetSend qw(:all);
   
-  my $target_netbios_name = "pc04";
+  my $target_netbios_name;
   my $source_netbios_name = "mypc";
   my $target_ip = "192.168.0.1";
   my $message = "Hello World!";
   my $debug = 0;  
   
-  my $success = sendMsg($target_netbios_name, $source_netbios_name, $target_ip, $message, $debug);
+  $target_netbios_name = getNbName($target_ip, $debug);
+  if(!$target_netbios_name){
+  	die "No netbios name found: $@\n";
+  }
 
+  my $success = sendMsg($target_netbios_name, $source_netbios_name, $target_ip, $message, $debug);
   print ($success ? "Delivery successfull\n" : "Error in delivery! \n$@\n");
 
 =head1 DESCRIPTION
@@ -533,10 +711,11 @@ implementation that approximates the "net send" command on Windows.
 The source netbios name may be chosen freely and does not need to match your real
 netbios name.
 
-Both target netbios name and target IP are needed as there are no lookup procedures
-implemeted in this module yet. You're welcome to add these and send me a patch. If 
-noone else volunteers for this task, I intend to do this myself when I've got some 
-spare time for it. 
+Both target netbios name and target IP are needed when sending a message. However, 
+since version 0.12 this module includes a routine to lookup the netbios name of 
+a given IP. A lookup procedure vice versa is not implemeted in this module yet. 
+You're welcome to add it and send me a patch. If noone else volunteers for this 
+task, I intend to do this myself when I've got some spare time for it. 
 
 The target IP can be a numerical IP like it is shown above or a hostname like 
 host.domain.tld.
@@ -559,10 +738,10 @@ case of a failure it prints an error message.
 
 This module expects answers from the remote machine when a connection has been 
 successfully established. If the remote machine stops responding after the 
-connection has been established it might hang forever. You can use the alarm
-function to be sure this does not happen. As this situation is extremely rare you 
-probably don't need it. But if you intend to send thousands of messages at 
-once you should probably do it. 
+connection has been established it might hang for some time (forever?). You can 
+use the alarm function to be sure this does not happen. As this situation is 
+extremely rare you probably don't need it. But if you intend to send thousands 
+of messages at once you should probably do it. 
 
 Be advised that you need a short pause (one second is more than enough) between
 two messages to the same machine. No pause is needed between messages to different
@@ -576,18 +755,16 @@ sendMsg() in an eval statement.
 =head2 EXPORT
 
 None by default.
-:all exports just sendMsg() 
+:all exports sendMsg() and getNbName()
 
 =head1 NOTES
 
-This module is still under development. So far, sending messages was tested 
-from Windows XP and Linux to Windows XP as well as from Linux to Windows NT. 
-However, it should work on any other operating system as well. Drop me a note
+This module was tested with Windows XP, Windows 98, Windows NT and Linux.
+It should work on any other operating system as well. Drop me a note
 if you encounter errors, giving the exact circumstances of the failure and a 
-listing of the output with debug enabled.
+listing of the output with debug enabled. A packet dump would be helpful, too.
 
-Maximum Message size is 4000 bytes due to a Windows limitation.
-For Windows 98 / 98 SE / Me / 2000 the limit should not be different.
+Maximum Message size is 4000 bytes.
 
 =head1 CHANGES
 
@@ -761,6 +938,21 @@ error.
 
 =back
 
+=over 12
+
+B<new in 0.12>
+
+=item C<*>
+
+Added capability of looking up netbios names by IP address.
+
+=item C<*>
+
+Minor code adjustements.
+
+
+=back
+
 =head1 AUTHOR
 
 Florian Greb, E<lt>greb@cpan.orgE<gt>
@@ -768,7 +960,7 @@ Florian Greb, E<lt>greb@cpan.orgE<gt>
 
 =head1 COPYRIGHT
 
-Copyright (c) 2004 Florian Greb. All rights reserved. This program is free 
+Copyright (c) 2004-2005 Florian Greb. All rights reserved. This program is free 
 software; you can redistribute it and/or modify it under the same terms as Perl itself.
 
 =cut
