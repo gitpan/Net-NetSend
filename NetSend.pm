@@ -23,7 +23,7 @@ our %EXPORT_TAGS = ( 'all' => [ qw( sendMsg ) ] );
 our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
 
 our @EXPORT = qw();
-our $VERSION = '0.10';
+our $VERSION = '0.11';
 
 # Preloaded methods go here.
 
@@ -70,6 +70,7 @@ my $error_texts="";				#Error information storage
 
 sub sendMsg{
 	$@='';
+	$error_texts='';
 	if(@_ < 4){
 		$@ .= "Not enough arguments.\n";
 		return 0;
@@ -92,9 +93,9 @@ sub sendMsg{
 		$@ = $error_texts;
 		return $overall_succes;
 	}
-	if(length($message) > 4021){
-		$error_texts .= "Warning! Message size exceeds 4021 chars. Truncated message will be delivered.\n";
-		$message=substr($message, 0, 4021);
+	if(length($message) > 4000){
+		$error_texts .= "Warning! Message size exceeds 4000 chars. Truncated message will be delivered.\n";
+		$message=substr($message, 0, 4000);
 		$overall_succes=0;
 	}
 	#	print "Error: Message exceeds 128 Bytes.\n";
@@ -124,10 +125,11 @@ sub send_multi_block_message{
 	#Create Socket
 	my $sock;
 	my $proto = getprotobyname("tcp");
-	my $host = inet_aton($mbtarget_ip) or die "unknown host";
-	socket($sock, AF_INET, SOCK_STREAM, $proto) or die "socket() failed!";
+	my $host = inet_aton($mbtarget_ip) or die "Unknown host: $mbtarget_ip.\n";
+	socket($sock, AF_INET, SOCK_STREAM, $proto) or die "Could not create socket. Socket() failed: $!\n";
 	my $dest_addr = sockaddr_in($mbtarget_port, $host);
-	connect($sock, $dest_addr) or die "connect() failed!";
+	connect($sock, $dest_addr) 
+		or die "connect() of socket to $mbtarget_netbios_name_cleartext (IP: $mbtarget_ip) failed: $!\n";
 	$sock->autoflush(1);
 
 	#Compute Encoding for Source and Target NETBIOS names
@@ -302,11 +304,12 @@ sub send_single_block_message{
 	#     	   Create Socket	    #
 	#####################################
 	my $proto = getprotobyname("tcp");
-	my $host = inet_aton($target_ip) or die "unknown host";
+	my $host = inet_aton($target_ip) or die "Unknown host: $target_ip\n";
 	my $sock;
-	socket($sock, AF_INET, SOCK_STREAM, $proto) or die "socket() nicht moeglich!";
+	socket($sock, AF_INET, SOCK_STREAM, $proto) or die "Could not create socket. Socket() failed: $!\n";
 	my $dest_addr = sockaddr_in($target_port, $host);
-	connect($sock, $dest_addr) or die "connect() fehlgeschlagen!";
+	connect($sock, $dest_addr) 
+		or die "connect() of socket to $target_netbios_name_cleartext (IP: $target_ip) failed: $!";
 	$sock->autoflush(1);
 
 	#####################################
@@ -355,7 +358,7 @@ sub send_single_block_message{
 sub netbios_session_encaps{
 	my $smb_packet=shift;
 	my $enctype=shift;
-	die "Unsupported Encoding type in netbios_session_encaps()" if $enctype ne $NB_SESSION_MESSAGE;
+	die "Unsupported encoding type in netbios_session_encaps()" if $enctype ne $NB_SESSION_MESSAGE;
 	return $enctype . $INIT_SESSION_FLAGS . get_2bytes_length($smb_packet) . $smb_packet;
 }
 
@@ -522,8 +525,53 @@ Net::NetSend - Perl extension for sending Windows Popup Messages
 =head1 DESCRIPTION
 
 This module implements a client interface to the Windows Messenger Service, 
-enabling a perl5 application to talk to windows machines. This is roughly a pure 
-perl implementation of the "net send" command on windows. 
+enabling a perl5 application to talk to windows machines. This is a pure Perl 
+implementation that approximates the "net send" command on Windows.
+
+=head2 EXPLANATION
+
+The source netbios name may be chosen freely and does not need to match your real
+netbios name.
+
+Both target netbios name and target IP are needed as there are no lookup procedures
+implemeted in this module yet. You're welcome to add these and send me a patch. If 
+noone else volunteers for this task, I intend to do this myself when I've got some 
+spare time for it. 
+
+The target IP can be a numerical IP like it is shown above or a hostname like 
+host.domain.tld.
+
+The message can be any arbitrary string. If it is greater than 4000 chars the 
+message will still be delivered but truncated to 4000 chars. If you _really_ want to
+send more text than 4000 chars you can split your message into parts of the 
+respective maximum of 4000 chars and call sendMsg() for all parts consecutively. In 
+this case be sure to have a look at the CAVEATS section a few lines down this page.
+
+Debug is intended to print more status information in case of difficulties. In general
+it works like a "verbose" switch. The parameter "debug" is optional and defaults to 0. 
+It can be one or zero. Zero means "No, don't print debug messages.", one means "Yes, 
+please print debug messages to STDOUT."
+
+By default (debug off), sendMsg() does not print anything in case of success. In 
+case of a failure it prints an error message.
+
+=head2 CAVEATS
+
+This module expects answers from the remote machine when a connection has been 
+successfully established. If the remote machine stops responding after the 
+connection has been established it might hang forever. You can use the alarm
+function to be sure this does not happen. As this situation is extremely rare you 
+probably don't need it. But if you intend to send thousands of messages at 
+once you should probably do it. 
+
+Be advised that you need a short pause (one second is more than enough) between
+two messages to the same machine. No pause is needed between messages to different
+machines.
+
+If sendMsg() fails it will call die(). If you don't want your program to exit
+when sending a message to one machine fails (because you want it to try 
+delivering the message to another machine) you have to encapsulate the call to 
+sendMsg() in an eval statement.
 
 =head2 EXPORT
 
@@ -532,14 +580,14 @@ None by default.
 
 =head1 NOTES
 
-This module is still under development. So far, sending messages was just tested 
-from Windows XP and Linux to Windows XP. 
+This module is still under development. So far, sending messages was tested 
+from Windows XP and Linux to Windows XP as well as from Linux to Windows NT. 
 However, it should work on any other operating system as well. Drop me a note
-if you encounter errors, giving the exact circumstances of the failure.
+if you encounter errors, giving the exact circumstances of the failure and a 
+listing of the output with debug enabled.
 
-Maximum Message size is 4021 bytes - it is a limitation of windows, not of my 
-module.
-For Windows 98 / 98 SE / Me / 2000 the limit may be different.
+Maximum Message size is 4000 bytes due to a Windows limitation.
+For Windows 98 / 98 SE / Me / 2000 the limit should not be different.
 
 =head1 CHANGES
 
@@ -674,6 +722,44 @@ POD documentation
 
 =back
 
+
+=over 12
+
+B<new in 0.11>
+
+=item C<*>
+
+Cut message size to 4000 chars. This is more safe. 
+Before, sending could fail if message length plus 
+source netbios name plus target nebios name were 
+greater than 4032 chars. 
+
+=item C<*>
+
+An accidentally German error message was translated to 
+English and extended to give more information about 
+the error. Thanks to Tom Metro for reporting this 
+and some other things.
+
+=item C<*>
+
+Documentation about caveats added.
+
+=item C<*>
+
+Bugfix for accumulating error texts as reported by 
+brae.charles at mail.com. (Thanks!) 
+
+=item C<*>
+
+POD documentation extended.
+
+=item C<*>
+
+Error messages improved to give more information about the 
+error.
+
+=back
 
 =head1 AUTHOR
 

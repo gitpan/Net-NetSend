@@ -37,3 +37,9 @@ Revision history for Perl extension Net::NetSend.
 
 0.10  Fri Aug 13 17:18:05 2004
 	- POD documentation
+
+0.11  Sun Nov 11 15:04:28 2004
+	- max message size 4000 characters
+	- error message improvements
+	- bugfix for accumulating error texts
+	- extended documentation
